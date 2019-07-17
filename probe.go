@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
+	"github.com/google/gopacket/layers"
 	"github.com/montanaflynn/stats"
 
 	"github.com/getlantern/errors"
@@ -36,6 +38,58 @@ type FailedCheck interface {
 type failedCheck struct{ error }
 
 func (fc failedCheck) isFailedCheck() {}
+
+// RTShortcut is temporarily available for debugging.
+func RTShortcut(cfg Config, min, max, stddev float64) error {
+	const maxPayloadSize = 1024 * 1024
+
+	baselineResp := responseBaseline{min, max, stddev}
+	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
+		fmt.Printf("trying %d byte payload\n", payloadSize)
+
+		payload := make([]byte, payloadSize)
+		_, err := rand.Read(payload)
+		if err != nil {
+			return false, "", errors.New("failed to generate payload: %v", err)
+		}
+
+		resp, err := sendTCPPayload(cfg.Network, cfg.Address, payload)
+		if err != nil {
+			return false, "", errors.New("failed to send payload: %v", err)
+		}
+
+		return baselineResp.withinAcceptedBounds(*resp)
+	}
+	respOutOfBounds := func(payloadSize int) (bool, error) {
+		ok, explanation, err := respWithinBoundsFull(payloadSize)
+		if err == nil && !ok {
+			fmt.Println("explanation:", explanation)
+		}
+		// TODO: this is clunky
+		return !ok, err
+	}
+
+	fmt.Println("trying varying payload sizes")
+
+	payloadSizeThreshold, err := minBinarySearch(2, maxPayloadSize, respOutOfBounds)
+	if err != nil {
+		return errors.New("search for payload size threshold failed: %v", err)
+	}
+	if payloadSizeThreshold > 0 {
+		errMsg := fmt.Sprintf(
+			"response to payload of %d bytes fell outside bounds established by baseline",
+			payloadSizeThreshold,
+		)
+		// TODO: get the explanation from the actual test
+		_, explanation, _ := respWithinBoundsFull(payloadSizeThreshold)
+		if explanation != "" {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, explanation)
+		}
+		fmt.Println("found evidence of randomized transport:", errMsg)
+		return failedCheck{errors.New(errMsg)}
+	}
+	return nil
+}
 
 // ForRandomizedTransport probes for evidence of a randomized transport like obsf4 or Lampshade.
 func ForRandomizedTransport(cfg Config) error {
@@ -103,6 +157,7 @@ func ForRandomizedTransport(cfg Config) error {
 			"response to payload of %d bytes fell outside bounds established by baseline",
 			payloadSizeThreshold,
 		)
+		// TODO: get the explanation from the actual test
 		_, explanation, _ := respWithinBoundsFull(payloadSizeThreshold)
 		if explanation != "" {
 			errMsg = fmt.Sprintf("%s: %s", errMsg, explanation)
@@ -164,8 +219,19 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	captureComplete := make(chan struct{})
 	captureErrors := make(chan error)
 	go func() {
+		// debugging
+		fmt.Println("================= captured packets ====================")
+
 		for pkt := range conn.CapturedPackets() {
 			capturedPackets = append(capturedPackets, pkt)
+
+			// debugging
+			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, layers.LayerTypeEthernet)
+			if err != nil {
+				fmt.Println("decoding error:", err)
+			}
+			decoded.Timestamp = pkt.Timestamp
+			fmt.Println(decoded.Pprint())
 		}
 		close(captureComplete)
 	}()
@@ -175,8 +241,33 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 		}
 	}()
 
-	if _, err := conn.Write(payload); err != nil {
+	// Because we are sometimes triggering error states on the servers we write to, we expect to run
+	// into certain errors.
+	acceptableWriteError := func(n int, err error) bool {
+		// If we didn't write any bytes successfully, the write was a failure.
+		if n == 0 {
+			return false
+		}
+		// A broken pipe partway through a write indicates that the connection has been reset. We
+		// expect some servers to do this for large payloads.
+		if strings.Contains(err.Error(), "broken pipe") {
+			return true
+		}
+		// An incorrect protocol error partway through a write indicates that the connection has
+		// been reset.
+		if strings.Contains(err.Error(), "protocol wrong type for socket") {
+			return true
+		}
+		return false
+	}
+
+	n, err := conn.Write(payload)
+	if err != nil && !acceptableWriteError(n, err) {
 		conn.Close()
+
+		// debugging
+		<-captureComplete
+
 		return nil, errors.New("failed to write payload: %v", err)
 	}
 
@@ -203,18 +294,18 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	default:
 	}
 
-	fmt.Println("================== captured packets ===================")
+	// fmt.Println("================== captured packets ===================")
 
 	pkts := make([]pktutil.TransportPacket, len(capturedPackets))
 	for i, pkt := range capturedPackets {
-		decoded, err := pktutil.DecodeTransportPacket(pkt.Data)
+		decoded, err := pktutil.DecodeTransportPacket(pkt.Data, layers.LayerTypeEthernet)
 		if err != nil {
 			return nil, errors.New("failed to decode packet: %v", err)
 		}
 		decoded.Timestamp = pkt.Timestamp
 		pkts[i] = *decoded
 
-		fmt.Println(decoded.Pprint())
+		// fmt.Println(decoded.Pprint())
 	}
 
 	var (
