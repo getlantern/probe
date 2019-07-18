@@ -3,19 +3,29 @@
 package probe
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/gob"
 	"fmt"
+	"io"
 	"net"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/montanaflynn/stats"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/probednet"
 	"github.com/getlantern/probednet/pktutil"
 )
+
+// TODO:
+//	- add logger to config
+//	- memoize results in minBinarySearch
+//	- support saving and loading of baseline
+//	- analyze content of response packets
 
 // Config for a probe.
 type Config struct {
@@ -25,7 +35,26 @@ type Config struct {
 	// Address to probe.
 	Address string
 
+	// BaselineData is any data saved from a previously run probe. Providing baseline data will
+	// reduce the time needed for a probe test.
+	BaselineData io.Reader
+
 	// TODO: support timeout
+}
+
+// Results of a probe.
+type Results struct {
+	// Success reports whether the probe found what it was looking for. In most cases, you want this
+	// to be false. True means that the probe was able to identify the server as a circumvention
+	// tool.
+	Success bool
+
+	// Explanation is offered when Success is true.
+	Explanation string
+
+	// BaselineData encodes the baseline against which the probe's test was run. BaselineData is
+	// non-nil iff there is baseline data other than that provided for the test.
+	BaselineData io.Reader
 }
 
 // FailedCheck is a special error type indicating that a probed server failed a check. This can be
@@ -43,7 +72,7 @@ func (fc failedCheck) isFailedCheck() {}
 func RTShortcut(cfg Config, min, max, stddev float64) error {
 	const maxPayloadSize = 1024 * 1024
 
-	baselineResp := responseBaseline{min, max, stddev}
+	baselineResp := randomizedProbeBaseline{min, max, stddev}
 	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
 		fmt.Printf("trying %d byte payload\n", payloadSize)
 
@@ -92,7 +121,7 @@ func RTShortcut(cfg Config, min, max, stddev float64) error {
 }
 
 // ForRandomizedTransport probes for evidence of a randomized transport like obsf4 or Lampshade.
-func ForRandomizedTransport(cfg Config) error {
+func ForRandomizedTransport(cfg Config) (*Results, error) {
 
 	// 1. Establish a baseline response using single-byte payloads.
 	// 2. Using a binary search (up to a maximum payload size), find the payload length at which the
@@ -107,19 +136,40 @@ func ForRandomizedTransport(cfg Config) error {
 		baselinePackets = 10
 	)
 
-	fmt.Println("establishing baseline")
-
-	baselineResp, err := establishBaselineResponse(cfg, baselinePackets)
-	if err != nil {
-		return errors.New("failed to establish baseline response: %v", err)
-	}
-
-	fmt.Printf(
-		"baseline response:\n\tmin response time: %v\n\tmax response time: %v\n\tresponse time standard deviation: %v\n",
-		time.Duration(baselineResp.minResponseTime),
-		time.Duration(baselineResp.maxResponseTime),
-		time.Duration(baselineResp.responseTimeStdDev),
+	var (
+		baseline *randomizedProbeBaseline
+		err      error
+		results  Results
 	)
+
+	if cfg.BaselineData == nil {
+		fmt.Println("establishing baseline")
+
+		baseline, err = establishRandomizedProbeBaseline(cfg, baselinePackets)
+		if err != nil {
+			return nil, errors.New("failed to establish baseline response: %v", err)
+		}
+		buf := new(bytes.Buffer)
+		if err := gob.NewEncoder(buf).Encode(baseline); err != nil {
+			return nil, errors.New("failed to encode baseline data: %v", err)
+		}
+		results.BaselineData = buf
+
+		fmt.Printf(
+			"baseline response:\n\tmin response time: %v\n\tmax response time: %v\n\tresponse time standard deviation: %v\n",
+			time.Duration(baseline.MinResponseTime),
+			time.Duration(baseline.MaxResponseTime),
+			time.Duration(baseline.ResponseTimeStdDev),
+		)
+	} else {
+		fmt.Println("using pre-configured baseline")
+
+		baseline = new(randomizedProbeBaseline)
+		if err := gob.NewDecoder(cfg.BaselineData).Decode(baseline); err != nil {
+			return nil, errors.New("failed to decode baseline data: %v", err)
+
+		}
+	}
 
 	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
 		fmt.Printf("trying %d byte payload\n", payloadSize)
@@ -135,7 +185,7 @@ func ForRandomizedTransport(cfg Config) error {
 			return false, "", errors.New("failed to send payload: %v", err)
 		}
 
-		return baselineResp.withinAcceptedBounds(*resp)
+		return baseline.withinAcceptedBounds(*resp)
 	}
 	respOutOfBounds := func(payloadSize int) (bool, error) {
 		ok, explanation, err := respWithinBoundsFull(payloadSize)
@@ -150,22 +200,23 @@ func ForRandomizedTransport(cfg Config) error {
 
 	payloadSizeThreshold, err := minBinarySearch(2, maxPayloadSize, respOutOfBounds)
 	if err != nil {
-		return errors.New("search for payload size threshold failed: %v", err)
+		return nil, errors.New("search for payload size threshold failed: %v", err)
 	}
 	if payloadSizeThreshold > 0 {
-		errMsg := fmt.Sprintf(
+		results.Success = true
+		results.Explanation = fmt.Sprintf(
 			"response to payload of %d bytes fell outside bounds established by baseline",
 			payloadSizeThreshold,
 		)
 		// TODO: get the explanation from the actual test
-		_, explanation, _ := respWithinBoundsFull(payloadSizeThreshold)
-		if explanation != "" {
-			errMsg = fmt.Sprintf("%s: %s", errMsg, explanation)
+		_, additionalExplanation, _ := respWithinBoundsFull(payloadSizeThreshold)
+		if results.Explanation != "" {
+			results.Explanation = fmt.Sprintf("%s: %s", results.Explanation, additionalExplanation)
 		}
-		fmt.Println("found evidence of randomized transport:", errMsg)
-		return failedCheck{errors.New(errMsg)}
+	} else {
+		results.Success = false
 	}
-	return nil
+	return &results, nil
 }
 
 type tcpResponse struct {
@@ -214,6 +265,7 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	if err != nil {
 		return nil, errors.New("failed to dial address: %v", err)
 	}
+	linkLayer := expectedLinkLayer(conn.RemoteAddr())
 
 	capturedPackets := []probednet.Packet{}
 	captureComplete := make(chan struct{})
@@ -226,12 +278,13 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 			capturedPackets = append(capturedPackets, pkt)
 
 			// debugging
-			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, layers.LayerTypeEthernet)
+			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
 			if err != nil {
 				fmt.Println("decoding error:", err)
+			} else {
+				decoded.Timestamp = pkt.Timestamp
+				fmt.Println(decoded.Pprint())
 			}
-			decoded.Timestamp = pkt.Timestamp
-			fmt.Println(decoded.Pprint())
 		}
 		close(captureComplete)
 	}()
@@ -298,7 +351,7 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 
 	pkts := make([]pktutil.TransportPacket, len(capturedPackets))
 	for i, pkt := range capturedPackets {
-		decoded, err := pktutil.DecodeTransportPacket(pkt.Data, layers.LayerTypeEthernet)
+		decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
 		if err != nil {
 			return nil, errors.New("failed to decode packet: %v", err)
 		}
@@ -347,70 +400,18 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	return &tcpResponse{payloadPkts, responsePkts}, nil
 }
 
-type responseBaseline struct {
-	minResponseTime    float64
-	maxResponseTime    float64
-	responseTimeStdDev float64
-}
-
-// Establishes a baseline response to single-packet payloads. A new connection is established for
-// each payload.
-func establishBaselineResponse(cfg Config, baselinePackets int) (*responseBaseline, error) {
-	var testPayload = []byte{1}
-
-	responseTimes := make([]int64, baselinePackets)
-	// TODO: track responses: payloads, flags, how many packets
-	for i := 0; i < baselinePackets; i++ {
-		resp, err := sendTCPPayload(cfg.Network, cfg.Address, testPayload)
-		if err != nil {
-			return nil, errors.New("failed to send test payload: %v", err)
-		}
-		respTime, err := resp.responseTime()
-		if err != nil {
-			return nil, errors.New("failed to calculate response time to payload: %v", err)
-		}
-
-		fmt.Println("response time:", respTime)
-		responseTimes[i] = int64(respTime)
-	}
-
-	responseTimeData := stats.LoadRawData(responseTimes)
-	minResponseTime, err := responseTimeData.Min()
+func expectedLinkLayer(addr net.Addr) gopacket.LayerType {
+	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
-		return nil, errors.New("failed to calculate minimum response time: %v", err)
+		panic(fmt.Sprint("unexpected failure to parse address: ", err))
 	}
-	maxResponseTime, err := responseTimeData.Max()
-	if err != nil {
-		return nil, errors.New("failed to calculate maximum response time: %v", err)
+	if !net.ParseIP(host).IsLoopback() {
+		return layers.LayerTypeEthernet
 	}
-	responseTimeStdDev, err := responseTimeData.StandardDeviation()
-	if err != nil {
-		return nil, errors.New("failed to standard deviation of response time: %v", err)
+	if runtime.GOOS == "linux" {
+		return layers.LayerTypeEthernet
 	}
-	return &responseBaseline{minResponseTime, maxResponseTime, responseTimeStdDev}, nil
-}
-
-// An explanation is provided when the response falls outside the accepted bounds.
-func (baseline responseBaseline) withinAcceptedBounds(resp tcpResponse) (_ bool, explanation string, _ error) {
-	respTime, err := resp.responseTime()
-	if err != nil {
-		return false, "", errors.New("failed to calculate response time: %v", err)
-	}
-	if float64(respTime) < baseline.minResponseTime-baseline.responseTimeStdDev {
-		explanation := fmt.Sprintf(
-			"response time %v is more than a standard deviation (%v) less than the minimum baseline response time of %v",
-			respTime, time.Duration(baseline.responseTimeStdDev), time.Duration(baseline.minResponseTime),
-		)
-		return false, explanation, nil
-	}
-	if float64(respTime) > baseline.maxResponseTime+baseline.responseTimeStdDev {
-		explanation := fmt.Sprintf(
-			"response time %v is more than a standard deviation (%v) greater than the maximum baseline response time of %v",
-			respTime, time.Duration(baseline.responseTimeStdDev), time.Duration(baseline.maxResponseTime),
-		)
-		return false, explanation, nil
-	}
-	return true, "", nil
+	return layers.LayerTypeLoopback
 }
 
 // Returns the minimum integer in the range [start, end) for which the predicate is true. Assumes:

@@ -80,13 +80,12 @@ func TestForRandomizedTransport(t *testing.T) {
 	s := testRandomizedTransportServer{l, payloadSizeThreshold, maxPayloadSize, atThreshold}
 	go s.serve(serverErrors)
 
-	err = ForRandomizedTransport(Config{
+	results, err := ForRandomizedTransport(Config{
 		Network: network,
 		Address: s.Addr().String(),
 	})
-	require.NotNil(t, err)
-	_, ok := err.(FailedCheck)
-	require.True(t, ok, "expected FailedCheck, received: %v", err)
+	require.NoError(t, err)
+	require.True(t, results.Success)
 
 	// TODO: check that threshold was correct
 }
