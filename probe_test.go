@@ -1,7 +1,6 @@
 package probe
 
 import (
-	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -62,7 +61,7 @@ func TestForRandomizedTransport(t *testing.T) {
 	)
 
 	// At the threshold size, we introduce a brief delay.
-	atThreshold := func(conn net.Conn) error { fmt.Println("atThreshold called"); time.Sleep(time.Second); return nil }
+	atThreshold := func(conn net.Conn) error { time.Sleep(time.Second); return nil }
 
 	l, err := net.Listen(network, localhost0)
 	require.NoError(t, err)

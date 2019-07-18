@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"runtime"
 	"strings"
@@ -21,8 +22,8 @@ import (
 )
 
 // TODO:
-//	- add logger to config
 //	- memoize results in minBinarySearch
+// 	- try parallelizing baseline measurement
 //	- analyze content of response packets
 
 // Config for a probe.
@@ -37,7 +38,16 @@ type Config struct {
 	// reduce the time needed for a probe test.
 	BaselineData io.Reader
 
+	Logger io.Writer
+
 	// TODO: support timeout
+}
+
+func (c Config) logger() io.Writer {
+	if c.Logger == nil {
+		return ioutil.Discard
+	}
+	return c.Logger
 }
 
 // Results of a probe.
@@ -83,13 +93,13 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			return nil, errors.New("failed to read baseline data: %v", err)
 		}
 		if bd.ForRandomizedTransport != nil && bd.ForRandomizedTransport.complete() {
-			fmt.Println("using pre-configured baseline")
+			fmt.Fprintln(cfg.logger(), "using pre-configured baseline")
 			baseline = bd.ForRandomizedTransport
 		}
 	}
 
 	if baseline == nil {
-		fmt.Println("establishing baseline")
+		fmt.Fprintln(cfg.logger(), "establishing baseline")
 
 		bd := new(baselineData)
 		bd.ForRandomizedTransport, err = establishRandomizedTransportBaseline(cfg, baselinePackets)
@@ -102,7 +112,8 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		}
 		results.BaselineData = buf
 
-		fmt.Printf(
+		fmt.Fprintf(
+			cfg.logger(),
 			"baseline response:\n\tmin response time: %v\n\tmax response time: %v\n\tresponse time standard deviation: %v\n",
 			time.Duration(baseline.MinResponseTime),
 			time.Duration(baseline.MaxResponseTime),
@@ -111,7 +122,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	}
 
 	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
-		fmt.Printf("trying %d byte payload\n", payloadSize)
+		fmt.Fprintf(cfg.logger(), "trying %d byte payload\n", payloadSize)
 
 		payload := make([]byte, payloadSize)
 		_, err := rand.Read(payload)
@@ -119,7 +130,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			return false, "", errors.New("failed to generate payload: %v", err)
 		}
 
-		resp, err := sendTCPPayload(cfg.Network, cfg.Address, payload)
+		resp, err := sendTCPPayload(cfg, payload)
 		if err != nil {
 			return false, "", errors.New("failed to send payload: %v", err)
 		}
@@ -127,15 +138,12 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		return baseline.withinAcceptedBounds(*resp)
 	}
 	respOutOfBounds := func(payloadSize int) (bool, error) {
-		ok, explanation, err := respWithinBoundsFull(payloadSize)
-		if err == nil && !ok {
-			fmt.Println("explanation:", explanation)
-		}
+		ok, _, err := respWithinBoundsFull(payloadSize)
 		// TODO: this is clunky
 		return !ok, err
 	}
 
-	fmt.Println("trying varying payload sizes")
+	fmt.Fprintln(cfg.logger(), "trying varying payload sizes")
 
 	payloadSizeThreshold, err := minBinarySearch(2, maxPayloadSize, respOutOfBounds)
 	if err != nil {
@@ -191,39 +199,35 @@ func (r tcpResponse) responseTime() (time.Duration, error) {
 	if firstSent.Timestamp.IsZero() || firstResponse.Timestamp.IsZero() {
 		return 0, errors.New("no timestamps on captured packets")
 	}
-	fmt.Printf("firstNonACK.timestamp: %v, firstSent.timestamp: %v\n", firstResponse.Timestamp, firstSent.Timestamp)
 	return firstResponse.Timestamp.Sub(firstSent.Timestamp), nil
 }
 
 // Establishes a connection and sends the input payload. Returns all packets sent in response. The
 // response is guaranteed to have at least one packet.
-func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, error) {
+func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	// TODO: currently assuming in-order packet capture - vet or fix this
 
-	conn, err := probednet.Dial(network, address)
+	conn, err := probednet.Dial(cfg.Network, cfg.Address)
 	if err != nil {
 		return nil, errors.New("failed to dial address: %v", err)
 	}
 	linkLayer := expectedLinkLayer(conn.RemoteAddr())
 
-	capturedPackets := []probednet.Packet{}
+	capturedPackets := []pktutil.TransportPacket{}
 	captureComplete := make(chan struct{})
 	captureErrors := make(chan error)
 	go func() {
-		// debugging
-		fmt.Println("================= captured packets ====================")
-
+		fmt.Fprintln(cfg.logger(), "================= captured packets ====================")
 		for pkt := range conn.CapturedPackets() {
-			capturedPackets = append(capturedPackets, pkt)
-
-			// debugging
 			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
 			if err != nil {
-				fmt.Println("decoding error:", err)
-			} else {
-				decoded.Timestamp = pkt.Timestamp
-				fmt.Println(decoded.Pprint())
+				captureErrors <- errors.New("failed to decode captured packet: %v", err)
+				return
 			}
+			decoded.Timestamp = pkt.Timestamp
+			capturedPackets = append(capturedPackets, *decoded)
+
+			fmt.Fprintln(cfg.logger(), decoded.Pprint())
 		}
 		close(captureComplete)
 	}()
@@ -257,7 +261,7 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	if err != nil && !acceptableWriteError(n, err) {
 		conn.Close()
 
-		// debugging
+		// Wait for capture to complete so that relevant packets get logged.
 		<-captureComplete
 
 		return nil, errors.New("failed to write payload: %v", err)
@@ -286,25 +290,11 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	default:
 	}
 
-	// fmt.Println("================== captured packets ===================")
-
-	pkts := make([]pktutil.TransportPacket, len(capturedPackets))
-	for i, pkt := range capturedPackets {
-		decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
-		if err != nil {
-			return nil, errors.New("failed to decode packet: %v", err)
-		}
-		decoded.Timestamp = pkt.Timestamp
-		pkts[i] = *decoded
-
-		// fmt.Println(decoded.Pprint())
-	}
-
 	var (
 		payloadPkts  []pktutil.TransportPacket
 		responsePkts []pktutil.TransportPacket
 	)
-	for _, pkt := range pkts {
+	for _, pkt := range capturedPackets {
 		if pkt.DestinedFor(conn.RemoteAddr()) && len(pkt.Payload) > 0 {
 			payloadPkts = append(payloadPkts, pkt)
 		}
@@ -323,18 +313,6 @@ func sendTCPPayload(network, address string, payload []byte) (*tcpResponse, erro
 	if len(responsePkts) == 0 {
 		return nil, errors.New("unable to find response packets in capture output")
 	}
-
-	// fmt.Println("=================================")
-	// fmt.Println("============= sent ==============")
-	// fmt.Println("=================================")
-	// fmt.Println(payloadPkt.Pprint())
-
-	// fmt.Println("=================================")
-	// fmt.Println("=========== response ============")
-	// fmt.Println("=================================")
-	// for _, p := range responsePkts {
-	// 	fmt.Println(p.Pprint())
-	// }
 
 	return &tcpResponse{payloadPkts, responsePkts}, nil
 }

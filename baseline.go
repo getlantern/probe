@@ -41,7 +41,7 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*for
 	responseTimes := make([]int64, baselinePackets)
 	// TODO: track responses: payloads, flags, how many packets
 	for i := 0; i < baselinePackets; i++ {
-		resp, err := sendTCPPayload(cfg.Network, cfg.Address, testPayload)
+		resp, err := sendTCPPayload(cfg, testPayload)
 		if err != nil {
 			return nil, errors.New("failed to send test payload: %v", err)
 		}
@@ -50,7 +50,6 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*for
 			return nil, errors.New("failed to calculate response time to payload: %v", err)
 		}
 
-		fmt.Println("response time:", respTime)
 		responseTimes[i] = int64(respTime)
 	}
 
