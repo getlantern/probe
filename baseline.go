@@ -1,7 +1,9 @@
 package probe
 
 import (
+	"encoding/gob"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/montanaflynn/stats"
@@ -9,13 +11,31 @@ import (
 	"github.com/getlantern/errors"
 )
 
-type randomizedProbeBaseline struct {
+// baselineData is the container for all baseline data. This is always the structure encoded in
+// Config.BaselineData or Results.BaselineData.
+type baselineData struct {
+	ForRandomizedTransport *forRandomizedTransportBaseline
+}
+
+func readBaselineData(r io.Reader) (*baselineData, error) {
+	bd := new(baselineData)
+	if err := gob.NewDecoder(r).Decode(bd); err != nil {
+		return nil, err
+	}
+	return bd, nil
+}
+
+func (bd baselineData) write(w io.Writer) error {
+	return gob.NewEncoder(w).Encode(bd)
+}
+
+type forRandomizedTransportBaseline struct {
 	MinResponseTime    float64
 	MaxResponseTime    float64
 	ResponseTimeStdDev float64
 }
 
-func establishRandomizedProbeBaseline(cfg Config, baselinePackets int) (*randomizedProbeBaseline, error) {
+func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*forRandomizedTransportBaseline, error) {
 	var testPayload = []byte{1}
 
 	responseTimes := make([]int64, baselinePackets)
@@ -47,11 +67,11 @@ func establishRandomizedProbeBaseline(cfg Config, baselinePackets int) (*randomi
 	if err != nil {
 		return nil, errors.New("failed to standard deviation of response time: %v", err)
 	}
-	return &randomizedProbeBaseline{minResponseTime, maxResponseTime, responseTimeStdDev}, nil
+	return &forRandomizedTransportBaseline{minResponseTime, maxResponseTime, responseTimeStdDev}, nil
 }
 
 // An explanation is provided when the response falls outside the accepted bounds.
-func (b *randomizedProbeBaseline) withinAcceptedBounds(resp tcpResponse) (_ bool, explanation string, _ error) {
+func (b *forRandomizedTransportBaseline) withinAcceptedBounds(resp tcpResponse) (_ bool, explanation string, _ error) {
 	respTime, err := resp.responseTime()
 	if err != nil {
 		return false, "", errors.New("failed to calculate response time: %v", err)
@@ -71,4 +91,8 @@ func (b *randomizedProbeBaseline) withinAcceptedBounds(resp tcpResponse) (_ bool
 		return false, explanation, nil
 	}
 	return true, "", nil
+}
+
+func (b forRandomizedTransportBaseline) complete() bool {
+	return b.MinResponseTime != 0 && b.MaxResponseTime != 0 && b.ResponseTimeStdDev != 0
 }

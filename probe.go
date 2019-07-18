@@ -5,7 +5,6 @@ package probe
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/gob"
 	"fmt"
 	"io"
 	"net"
@@ -73,21 +72,33 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	)
 
 	var (
-		baseline *randomizedProbeBaseline
+		baseline *forRandomizedTransportBaseline
 		err      error
 		results  Results
 	)
 
-	if cfg.BaselineData == nil {
+	if cfg.BaselineData != nil {
+		bd, err := readBaselineData(cfg.BaselineData)
+		if err != nil {
+			return nil, errors.New("failed to read baseline data: %v", err)
+		}
+		if bd.ForRandomizedTransport != nil && bd.ForRandomizedTransport.complete() {
+			fmt.Println("using pre-configured baseline")
+			baseline = bd.ForRandomizedTransport
+		}
+	}
+
+	if baseline == nil {
 		fmt.Println("establishing baseline")
 
-		baseline, err = establishRandomizedProbeBaseline(cfg, baselinePackets)
+		bd := new(baselineData)
+		bd.ForRandomizedTransport, err = establishRandomizedTransportBaseline(cfg, baselinePackets)
 		if err != nil {
 			return nil, errors.New("failed to establish baseline response: %v", err)
 		}
 		buf := new(bytes.Buffer)
-		if err := gob.NewEncoder(buf).Encode(baseline); err != nil {
-			return nil, errors.New("failed to encode baseline data: %v", err)
+		if err := bd.write(buf); err != nil {
+			return nil, errors.New("failed to write baseline data: %v", err)
 		}
 		results.BaselineData = buf
 
@@ -97,14 +108,6 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			time.Duration(baseline.MaxResponseTime),
 			time.Duration(baseline.ResponseTimeStdDev),
 		)
-	} else {
-		fmt.Println("using pre-configured baseline")
-
-		baseline = new(randomizedProbeBaseline)
-		if err := gob.NewDecoder(cfg.BaselineData).Decode(baseline); err != nil {
-			return nil, errors.New("failed to decode baseline data: %v", err)
-
-		}
 	}
 
 	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
