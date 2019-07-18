@@ -24,7 +24,6 @@ import (
 // TODO:
 //	- add logger to config
 //	- memoize results in minBinarySearch
-//	- support saving and loading of baseline
 //	- analyze content of response packets
 
 // Config for a probe.
@@ -49,75 +48,12 @@ type Results struct {
 	// tool.
 	Success bool
 
-	// Explanation is offered when Success is true.
+	// An explanation is provided when Success is true.
 	Explanation string
 
 	// BaselineData encodes the baseline against which the probe's test was run. BaselineData is
-	// non-nil iff there is baseline data other than that provided for the test.
+	// non-nil iff the probe created baseline data outside of what was provided by Config.
 	BaselineData io.Reader
-}
-
-// FailedCheck is a special error type indicating that a probed server failed a check. This can be
-// used to distinguish detectability errors from errors rooted in things like network failures.
-type FailedCheck interface {
-	error
-	isFailedCheck()
-}
-
-type failedCheck struct{ error }
-
-func (fc failedCheck) isFailedCheck() {}
-
-// RTShortcut is temporarily available for debugging.
-func RTShortcut(cfg Config, min, max, stddev float64) error {
-	const maxPayloadSize = 1024 * 1024
-
-	baselineResp := randomizedProbeBaseline{min, max, stddev}
-	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
-		fmt.Printf("trying %d byte payload\n", payloadSize)
-
-		payload := make([]byte, payloadSize)
-		_, err := rand.Read(payload)
-		if err != nil {
-			return false, "", errors.New("failed to generate payload: %v", err)
-		}
-
-		resp, err := sendTCPPayload(cfg.Network, cfg.Address, payload)
-		if err != nil {
-			return false, "", errors.New("failed to send payload: %v", err)
-		}
-
-		return baselineResp.withinAcceptedBounds(*resp)
-	}
-	respOutOfBounds := func(payloadSize int) (bool, error) {
-		ok, explanation, err := respWithinBoundsFull(payloadSize)
-		if err == nil && !ok {
-			fmt.Println("explanation:", explanation)
-		}
-		// TODO: this is clunky
-		return !ok, err
-	}
-
-	fmt.Println("trying varying payload sizes")
-
-	payloadSizeThreshold, err := minBinarySearch(2, maxPayloadSize, respOutOfBounds)
-	if err != nil {
-		return errors.New("search for payload size threshold failed: %v", err)
-	}
-	if payloadSizeThreshold > 0 {
-		errMsg := fmt.Sprintf(
-			"response to payload of %d bytes fell outside bounds established by baseline",
-			payloadSizeThreshold,
-		)
-		// TODO: get the explanation from the actual test
-		_, explanation, _ := respWithinBoundsFull(payloadSizeThreshold)
-		if explanation != "" {
-			errMsg = fmt.Sprintf("%s: %s", errMsg, explanation)
-		}
-		fmt.Println("found evidence of randomized transport:", errMsg)
-		return failedCheck{errors.New(errMsg)}
-	}
-	return nil
 }
 
 // ForRandomizedTransport probes for evidence of a randomized transport like obsf4 or Lampshade.
