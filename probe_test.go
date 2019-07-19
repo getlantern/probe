@@ -1,7 +1,10 @@
 package probe
 
 import (
+	"bytes"
+	"fmt"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -32,11 +35,12 @@ func (s testRandomizedTransportServer) serve(errChan chan<- error) {
 		go func(c net.Conn) {
 			defer c.Close()
 			b := make([]byte, s.maxPayloadSize)
-			n, err := c.Read(b)
+			n, err := readPayload(c, b)
 			if err != nil {
 				errChan <- errors.New("read failed: %v", err)
 				return
 			}
+			fmt.Printf("read %d bytes\n", n)
 			if n >= s.payloadSizeThreshold {
 				err := s.atThreshold(c)
 				if err != nil {
@@ -48,20 +52,59 @@ func (s testRandomizedTransportServer) serve(errChan chan<- error) {
 	}
 }
 
+// Reads from conn into b until conn.Read blocks or returns an error.
+func readPayload(conn net.Conn, b []byte) (n int, err error) {
+	// There should not be a delay between reads if there is data on the connection.
+	const timeout = 100 * time.Microsecond
+
+	var currentN int
+	for {
+		fmt.Println("reading")
+		conn.SetReadDeadline(time.Now().Add(timeout))
+		currentN, err = conn.Read(b[n:])
+		n = n + currentN
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return n, nil
+			}
+			return
+		}
+	}
+}
+
 func TestForRandomizedTransport(t *testing.T) {
 	t.Parallel()
 
 	const (
-		network              = "tcp"
-		localhost0           = "127.0.0.1:0"
-		payloadSizeThreshold = 128
+		network    = "tcp"
+		localhost0 = "127.0.0.1:0"
+
+		// This is strategically chosen to appear relatively early in the binary search.
+		payloadSizeThreshold = 524289
 
 		// This needs to be the same as defined in ForRandomizedTransport.
 		maxPayloadSize = 1024 * 1024
+
+		// Pre-configured baseline data.
+		minResponseTime = 200 * time.Microsecond
+		maxResponseTime = 1500 * time.Microsecond
+		respTimeStdDev  = 500 * time.Microsecond
+
+		// The delay at the threshold size is well outside the normal response time (defined by the
+		// baseline data).
+		delayAtThreshold = 10 * time.Millisecond
 	)
 
+	baselineBuf := new(bytes.Buffer)
+	bd := baselineData{
+		ForRandomizedTransport: &forRandomizedTransportBaseline{
+			minResponseTime, maxResponseTime, respTimeStdDev,
+		},
+	}
+	require.NoError(t, bd.write(baselineBuf))
+
 	// At the threshold size, we introduce a brief delay.
-	atThreshold := func(conn net.Conn) error { time.Sleep(time.Second); return nil }
+	atThreshold := func(conn net.Conn) error { fmt.Println("atThreshold called"); time.Sleep(delayAtThreshold); return nil }
 
 	l, err := net.Listen(network, localhost0)
 	require.NoError(t, err)
@@ -80,31 +123,13 @@ func TestForRandomizedTransport(t *testing.T) {
 	go s.serve(serverErrors)
 
 	results, err := ForRandomizedTransport(Config{
-		Network: network,
-		Address: s.Addr().String(),
+		Network:      network,
+		Address:      s.Addr().String(),
+		BaselineData: baselineBuf,
+		Logger:       os.Stdout,
 	})
 	require.NoError(t, err)
 	require.True(t, results.Success)
 
 	// TODO: check that threshold was correct
-}
-
-func TestMinBinarySearch(t *testing.T) {
-	for start := 0; start <= 7; start++ {
-		for end := start + 1; end <= 8; end++ {
-			for n := start; n <= end; n++ {
-				expected := n
-				if n == end {
-					expected = -1
-				}
-				actual, err := minBinarySearch(start, end, func(i int) (bool, error) { return i >= n, nil })
-				require.NoError(t, err)
-				require.Equal(
-					t, expected, actual,
-					"start: %d, end: %d, predicate: i >= %d",
-					start, end, n,
-				)
-			}
-		}
-	}
 }

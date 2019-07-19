@@ -106,6 +106,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		if err != nil {
 			return nil, errors.New("failed to establish baseline response: %v", err)
 		}
+		baseline = bd.ForRandomizedTransport
 		buf := new(bytes.Buffer)
 		if err := bd.write(buf); err != nil {
 			return nil, errors.New("failed to write baseline data: %v", err)
@@ -145,7 +146,8 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 
 	fmt.Fprintln(cfg.logger(), "trying varying payload sizes")
 
-	payloadSizeThreshold, err := minBinarySearch(2, maxPayloadSize, respOutOfBounds)
+	s := minBinarySearch{respOutOfBounds, map[int]bool{}}
+	payloadSizeThreshold, err := s.search(2, maxPayloadSize)
 	if err != nil {
 		return nil, errors.New("search for payload size threshold failed: %v", err)
 	}
@@ -217,6 +219,7 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	captureComplete := make(chan struct{})
 	captureErrors := make(chan error)
 	go func() {
+		defer close(captureComplete)
 		fmt.Fprintln(cfg.logger(), "================= captured packets ====================")
 		for pkt := range conn.CapturedPackets() {
 			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
@@ -229,7 +232,6 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 
 			fmt.Fprintln(cfg.logger(), decoded.Pprint())
 		}
-		close(captureComplete)
 	}()
 	go func() {
 		for err := range conn.CaptureErrors() {
@@ -240,17 +242,11 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	// Because we are sometimes triggering error states on the servers we write to, we expect to run
 	// into certain errors.
 	acceptableWriteError := func(n int, err error) bool {
-		// If we didn't write any bytes successfully, the write was a failure.
-		if n == 0 {
-			return false
-		}
-		// A broken pipe partway through a write indicates that the connection has been reset. We
-		// expect some servers to do this for large payloads.
+		// A broken pipe or incorrect protocol error indicates that the connection has been reset.
+		// We expect some servers to do this for large payloads.
 		if strings.Contains(err.Error(), "broken pipe") {
 			return true
 		}
-		// An incorrect protocol error partway through a write indicates that the connection has
-		// been reset.
 		if strings.Contains(err.Error(), "protocol wrong type for socket") {
 			return true
 		}
@@ -313,7 +309,6 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	if len(responsePkts) == 0 {
 		return nil, errors.New("unable to find response packets in capture output")
 	}
-
 	return &tcpResponse{payloadPkts, responsePkts}, nil
 }
 
@@ -329,45 +324,4 @@ func expectedLinkLayer(addr net.Addr) gopacket.LayerType {
 		return layers.LayerTypeEthernet
 	}
 	return layers.LayerTypeLoopback
-}
-
-// Returns the minimum integer in the range [start, end) for which the predicate is true. Assumes:
-// 	- end > start
-//	- start is > 0
-//	- if predicate(i) is true, then predicate(n) is true for all n > i
-//	- if predicate(i) is false, then preciate(n) is false for all n < i
-// Returns -1 if the predicate is false over the entire range.
-// Returns an error immediately if predicate returns an error.
-func minBinarySearch(start, end int, predicate func(int) (bool, error)) (_ int, err error) {
-	predicateStart, err := predicate(start)
-	if err != nil {
-		return 0, err
-	}
-	if predicateStart {
-		return start, nil
-	}
-	predicateEndMinus1, err := predicate(end - 1)
-	if err != nil {
-		return 0, err
-	}
-	if !predicateEndMinus1 {
-		return -1, nil
-	}
-
-	middle := ((end - start) / 2) + start
-	predicateMiddle, err := predicate(middle)
-	if err != nil {
-		return 0, err
-	}
-	if predicateMiddle {
-		lowerResult, err := minBinarySearch(start, middle, predicate)
-		if err != nil {
-			return 0, err
-		}
-		if lowerResult != -1 {
-			return lowerResult, nil
-		}
-		return middle, nil
-	}
-	return minBinarySearch(middle+1, end, predicate)
 }
