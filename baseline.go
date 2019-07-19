@@ -30,9 +30,7 @@ func (bd baselineData) write(w io.Writer) error {
 }
 
 type forRandomizedTransportBaseline struct {
-	MinResponseTime    float64
-	MaxResponseTime    float64
-	ResponseTimeStdDev float64
+	MinResponseTime, MaxResponseTime, ResponseTimeStdDev time.Duration
 }
 
 func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*forRandomizedTransportBaseline, error) {
@@ -66,7 +64,12 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*for
 	if err != nil {
 		return nil, errors.New("failed to standard deviation of response time: %v", err)
 	}
-	return &forRandomizedTransportBaseline{minResponseTime, maxResponseTime, responseTimeStdDev}, nil
+	return &forRandomizedTransportBaseline{
+		time.Duration(minResponseTime),
+		time.Duration(maxResponseTime),
+		// Truncating the std dev should be fine as we're only losing fractions of a nanosecond.
+		time.Duration(responseTimeStdDev),
+	}, nil
 }
 
 // An explanation is provided when the response falls outside the accepted bounds.
@@ -75,14 +78,14 @@ func (b *forRandomizedTransportBaseline) withinAcceptedBounds(resp tcpResponse) 
 	if err != nil {
 		return false, "", errors.New("failed to calculate response time: %v", err)
 	}
-	if float64(respTime) < b.MinResponseTime-b.ResponseTimeStdDev {
+	if respTime < b.MinResponseTime-b.ResponseTimeStdDev {
 		explanation := fmt.Sprintf(
 			"response time %v is more than a standard deviation (%v) less than the minimum baseline response time of %v",
 			respTime, time.Duration(b.ResponseTimeStdDev), time.Duration(b.MinResponseTime),
 		)
 		return false, explanation, nil
 	}
-	if float64(respTime) > b.MaxResponseTime+b.ResponseTimeStdDev {
+	if respTime > b.MaxResponseTime+b.ResponseTimeStdDev {
 		explanation := fmt.Sprintf(
 			"response time %v is more than a standard deviation (%v) greater than the maximum baseline response time of %v",
 			respTime, time.Duration(b.ResponseTimeStdDev), time.Duration(b.MaxResponseTime),
