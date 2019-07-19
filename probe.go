@@ -22,7 +22,6 @@ import (
 )
 
 // TODO:
-//	- memoize results in minBinarySearch
 // 	- try parallelizing baseline measurement
 //	- analyze content of response packets
 
@@ -58,11 +57,39 @@ type Results struct {
 	Success bool
 
 	// An explanation is provided when Success is true.
-	Explanation string
+	Explanation fmt.Stringer
 
 	// BaselineData encodes the baseline against which the probe's test was run. BaselineData is
 	// non-nil iff the probe created baseline data outside of what was provided by Config.
 	BaselineData io.Reader
+}
+
+// ForRandomizedTransportExplanation is the concrete type returned as the Results.Explanation when
+// a ForRandomizedTransport returns Results.Success.
+type ForRandomizedTransportExplanation struct {
+	// PayloadSizeThreshold is the payload size at which the behavior of the server changed.
+	PayloadSizeThreshold int
+
+	// ResponseTime is the time the server took to respond to a payload of the threshold size.
+	ResponseTime time.Duration
+
+	// Baseline against which responses were compared.
+	Baseline ForRandomizedTransportBaseline
+}
+
+func (e ForRandomizedTransportExplanation) String() string {
+	buf := new(bytes.Buffer)
+	ok, explanation := e.Baseline.withinAcceptedBounds(e.ResponseTime)
+	if !ok {
+		fmt.Fprintf(
+			buf,
+			"response to payload of %d bytes fell outside the bounds established by the baseline: %s",
+			e.PayloadSizeThreshold,
+			explanation,
+		)
+		return buf.String()
+	}
+	return ""
 }
 
 // ForRandomizedTransport probes for evidence of a randomized transport like obsf4 or Lampshade.
@@ -82,7 +109,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	)
 
 	var (
-		baseline *forRandomizedTransportBaseline
+		baseline *ForRandomizedTransportBaseline
 		err      error
 		results  Results
 	)
@@ -122,6 +149,8 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		)
 	}
 
+	explanations := map[int]ForRandomizedTransportExplanation{}
+
 	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
 		fmt.Fprintf(cfg.logger(), "trying %d byte payload\n", payloadSize)
 
@@ -136,7 +165,16 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			return false, "", errors.New("failed to send payload: %v", err)
 		}
 
-		return baseline.withinAcceptedBounds(*resp)
+		respTime, err := resp.responseTime()
+		if err != nil {
+			return false, "", errors.New("failed to calculate response time: %v", err)
+		}
+
+		ok, explanation := baseline.withinAcceptedBounds(respTime)
+		if !ok {
+			explanations[payloadSize] = ForRandomizedTransportExplanation{payloadSize, respTime, *baseline}
+		}
+		return ok, explanation, nil
 	}
 	respOutOfBounds := func(payloadSize int) (bool, error) {
 		ok, _, err := respWithinBoundsFull(payloadSize)
@@ -153,15 +191,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	}
 	if payloadSizeThreshold > 0 {
 		results.Success = true
-		results.Explanation = fmt.Sprintf(
-			"response to payload of %d bytes fell outside bounds established by baseline",
-			payloadSizeThreshold,
-		)
-		// TODO: get the explanation from the actual test
-		_, additionalExplanation, _ := respWithinBoundsFull(payloadSizeThreshold)
-		if results.Explanation != "" {
-			results.Explanation = fmt.Sprintf("%s: %s", results.Explanation, additionalExplanation)
-		}
+		results.Explanation = explanations[payloadSizeThreshold]
 	} else {
 		results.Success = false
 	}

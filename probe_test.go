@@ -97,7 +97,7 @@ func TestForRandomizedTransport(t *testing.T) {
 
 	baselineBuf := new(bytes.Buffer)
 	bd := baselineData{
-		ForRandomizedTransport: &forRandomizedTransportBaseline{
+		ForRandomizedTransport: &ForRandomizedTransportBaseline{
 			minResponseTime, maxResponseTime, respTimeStdDev,
 		},
 	}
@@ -130,6 +130,5 @@ func TestForRandomizedTransport(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, results.Success)
-
-	// TODO: check that threshold was correct
+	require.Equal(t, payloadSizeThreshold, results.Explanation.(ForRandomizedTransportExplanation).PayloadSizeThreshold)
 }
