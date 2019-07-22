@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,52 @@ func TestForRandomizedTransport(t *testing.T) {
 	t.Parallel()
 
 	const (
+		// Pre-configured baseline data.
+		minResponseTime = 200 * time.Microsecond
+		maxResponseTime = 1500 * time.Microsecond
+		respTimeStdDev  = 500 * time.Microsecond
+		respFlags       = "FIN ACK"
+	)
+
+	t.Run("response time", func(t *testing.T) {
+		t.Parallel()
+
+		// The delay at the threshold size is well outside the normal response time (defined by the
+		// baseline data).
+		const delayAtThreshold = 10 * time.Millisecond
+
+		baseline := ForRandomizedTransportBaseline{
+			minResponseTime,
+			maxResponseTime,
+			respTimeStdDev,
+			strings.Split(respFlags, " "),
+		}
+		atThreshold := func(conn net.Conn) error { time.Sleep(delayAtThreshold); return nil }
+
+		FRTHelper(t, baseline, atThreshold)
+	})
+
+	t.Run("response flags", func(t *testing.T) {
+		t.Parallel()
+
+		baseline := ForRandomizedTransportBaseline{
+			minResponseTime,
+			maxResponseTime,
+			respTimeStdDev,
+			strings.Split(respFlags, " "),
+		}
+
+		// Writing something before hanging up will change the response flags.
+		atThreshold := func(conn net.Conn) error { _, err := conn.Write([]byte{0}); return err }
+
+		FRTHelper(t, baseline, atThreshold)
+	})
+}
+
+func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshold func(net.Conn) error) {
+	t.Helper()
+
+	const (
 		network    = "tcp"
 		localhost0 = "127.0.0.1:0"
 
@@ -84,27 +131,11 @@ func TestForRandomizedTransport(t *testing.T) {
 
 		// This needs to be the same as defined in ForRandomizedTransport.
 		maxPayloadSize = 1024 * 1024
-
-		// Pre-configured baseline data.
-		minResponseTime = 200 * time.Microsecond
-		maxResponseTime = 1500 * time.Microsecond
-		respTimeStdDev  = 500 * time.Microsecond
-
-		// The delay at the threshold size is well outside the normal response time (defined by the
-		// baseline data).
-		delayAtThreshold = 10 * time.Millisecond
 	)
 
 	baselineBuf := new(bytes.Buffer)
-	bd := baselineData{
-		ForRandomizedTransport: &ForRandomizedTransportBaseline{
-			minResponseTime, maxResponseTime, respTimeStdDev,
-		},
-	}
+	bd := baselineData{ForRandomizedTransport: &baseline}
 	require.NoError(t, bd.write(baselineBuf))
-
-	// At the threshold size, we introduce a brief delay.
-	atThreshold := func(conn net.Conn) error { fmt.Println("atThreshold called"); time.Sleep(delayAtThreshold); return nil }
 
 	l, err := net.Listen(network, localhost0)
 	require.NoError(t, err)

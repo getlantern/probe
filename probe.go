@@ -23,7 +23,8 @@ import (
 
 // TODO:
 // 	- try parallelizing baseline measurement
-//	- analyze content of response packets
+//		- first try without parallelizing
+//		- try after parallelizing and make sure it's similar to before
 
 // Config for a probe.
 type Config struct {
@@ -65,13 +66,18 @@ type Results struct {
 }
 
 // ForRandomizedTransportExplanation is the concrete type returned as the Results.Explanation when
-// a ForRandomizedTransport returns Results.Success.
+// a ForRandomizedTransport probe returns Results.Success.
 type ForRandomizedTransportExplanation struct {
 	// PayloadSizeThreshold is the payload size at which the behavior of the server changed.
 	PayloadSizeThreshold int
 
 	// ResponseTime is the time the server took to respond to a payload of the threshold size.
 	ResponseTime time.Duration
+
+	// ResponseFlags is the set of TCP flags seen on the first response packet. The first response
+	// packet is defined as the first packet received from the server which (a) was sent after the
+	// first client payload packet and (b) was more than a simple ACK.
+	ResponseFlags []string
 
 	// Baseline against which responses were compared.
 	Baseline ForRandomizedTransportBaseline
@@ -86,6 +92,15 @@ func (e ForRandomizedTransportExplanation) String() string {
 			"response to payload of %d bytes fell outside the bounds established by the baseline: %s",
 			e.PayloadSizeThreshold,
 			explanation,
+		)
+		return buf.String()
+	}
+	if ok := e.Baseline.flagsMatchExpected(e.ResponseFlags); !ok {
+		fmt.Fprintf(
+			buf,
+			"response flags %v do not match those established by baseline %v",
+			e.ResponseFlags,
+			e.Baseline.ResponseFlags,
 		)
 		return buf.String()
 	}
@@ -140,46 +155,45 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		}
 		results.BaselineData = buf
 
-		fmt.Fprintf(
-			cfg.logger(),
-			"baseline response:\n\tmin response time: %v\n\tmax response time: %v\n\tresponse time standard deviation: %v\n",
-			time.Duration(baseline.MinResponseTime),
-			time.Duration(baseline.MaxResponseTime),
-			time.Duration(baseline.ResponseTimeStdDev),
-		)
+		fmt.Fprintln(cfg.logger(), *baseline)
 	}
 
 	explanations := map[int]ForRandomizedTransportExplanation{}
 
-	respWithinBoundsFull := func(payloadSize int) (_ bool, explanation string, _ error) {
+	respOutOfBounds := func(payloadSize int) (bool, error) {
 		fmt.Fprintf(cfg.logger(), "trying %d byte payload\n", payloadSize)
 
 		payload := make([]byte, payloadSize)
 		_, err := rand.Read(payload)
 		if err != nil {
-			return false, "", errors.New("failed to generate payload: %v", err)
+			return false, errors.New("failed to generate payload: %v", err)
 		}
 
 		resp, err := sendTCPPayload(cfg, payload)
 		if err != nil {
-			return false, "", errors.New("failed to send payload: %v", err)
+			return false, errors.New("failed to send payload: %v", err)
 		}
 
 		respTime, err := resp.responseTime()
 		if err != nil {
-			return false, "", errors.New("failed to calculate response time: %v", err)
+			return false, errors.New("failed to calculate response time: %v", err)
 		}
 
-		ok, explanation := baseline.withinAcceptedBounds(respTime)
-		if !ok {
-			explanations[payloadSize] = ForRandomizedTransportExplanation{payloadSize, respTime, *baseline}
+		firstNonACK, err := resp.firstNonACK()
+		if err != nil {
+			return false, errors.New("failed to analyze response flags: %v", err)
 		}
-		return ok, explanation, nil
-	}
-	respOutOfBounds := func(payloadSize int) (bool, error) {
-		ok, _, err := respWithinBoundsFull(payloadSize)
-		// TODO: this is clunky
-		return !ok, err
+
+		flags := flagsToStrings(firstNonACK.Flags())
+		expectedFlags := baseline.flagsMatchExpected(flags)
+		withinTimeBounds, _ := baseline.withinAcceptedBounds(respTime)
+		if !expectedFlags || !withinTimeBounds {
+			explanations[payloadSize] = ForRandomizedTransportExplanation{
+				payloadSize, respTime, flags, *baseline,
+			}
+			return true, nil
+		}
+		return false, nil
 	}
 
 	fmt.Fprintln(cfg.logger(), "trying varying payload sizes")
@@ -203,31 +217,34 @@ type tcpResponse struct {
 	packets []pktutil.TransportPacket
 }
 
+func (r tcpResponse) firstNonACK() (*pktutil.TransportPacket, error) {
+	if len(r.packets) < 1 {
+		return nil, errors.New("no response packets")
+	}
+
+	for _, pkt := range r.packets {
+		if pkt.HasAnyFlags(
+			pktutil.SYN, pktutil.FIN, pktutil.URG, pktutil.PSH,
+			pktutil.RST, pktutil.ECE, pktutil.CWR, pktutil.NS,
+		) {
+			return &pkt, nil
+		}
+	}
+	return nil, errors.New("could not find a response packet")
+}
+
 // We define the respone time as the time between the last packet we sent and the first packet we
 // received with any flag other than ACK.
 func (r tcpResponse) responseTime() (time.Duration, error) {
 	if len(r.sent) < 1 {
 		return 0, errors.New("no sent packets")
 	}
-	if len(r.packets) < 1 {
-		return 0, errors.New("no response packets")
-	}
 
 	firstSent := r.sent[0]
-	var firstResponse *pktutil.TransportPacket
-	for _, pkt := range r.packets {
-		if pkt.HasAnyFlags(
-			pktutil.SYN, pktutil.FIN, pktutil.URG, pktutil.PSH,
-			pktutil.RST, pktutil.ECE, pktutil.CWR, pktutil.NS,
-		) {
-			firstResponse = &pkt
-			break
-		}
+	firstResponse, err := r.firstNonACK()
+	if err != nil {
+		return 0, err
 	}
-	if firstResponse == nil {
-		return 0, errors.New("could not find a response packet")
-	}
-
 	if firstSent.Timestamp.IsZero() || firstResponse.Timestamp.IsZero() {
 		return 0, errors.New("no timestamps on captured packets")
 	}
