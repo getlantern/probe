@@ -2,7 +2,6 @@ package probe
 
 import (
 	"bytes"
-	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -41,7 +40,6 @@ func (s testRandomizedTransportServer) serve(errChan chan<- error) {
 				errChan <- errors.New("read failed: %v", err)
 				return
 			}
-			fmt.Printf("read %d bytes\n", n)
 			if n >= s.payloadSizeThreshold {
 				err := s.atThreshold(c)
 				if err != nil {
@@ -60,7 +58,6 @@ func readPayload(conn net.Conn, b []byte) (n int, err error) {
 
 	var currentN int
 	for {
-		fmt.Println("reading")
 		conn.SetReadDeadline(time.Now().Add(timeout))
 		currentN, err = conn.Read(b[n:])
 		n = n + currentN

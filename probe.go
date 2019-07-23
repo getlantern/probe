@@ -22,9 +22,8 @@ import (
 )
 
 // TODO:
-// 	- try parallelizing baseline measurement
-//		- first try without parallelizing
-//		- try after parallelizing and make sure it's similar to before
+// 	- try parallelizing binary search
+//	- clean up minor TODOs
 
 // Config for a probe.
 type Config struct {
@@ -116,11 +115,8 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	// 3. If the response never changes up to the maximum payload size, the check passes.
 
 	const (
-		maxPayloadSize = 1024 * 1024
-		// baselinePackets = 100
-
-		// debugging
-		baselinePackets = 10
+		maxPayloadSize  = 1024 * 1024
+		baselinePackets = 100
 	)
 
 	var (

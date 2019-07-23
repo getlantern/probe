@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/montanaflynn/stats"
@@ -47,35 +48,63 @@ type ForRandomizedTransportBaseline struct {
 func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*ForRandomizedTransportBaseline, error) {
 	var testPayload = []byte{1}
 
-	responseTimes := make([]int64, baselinePackets)
-	var respFlags []string
-	for i := 0; i < baselinePackets; i++ {
+	var (
+		timesChan = make(chan int64, baselinePackets)
+		flagsChan = make(chan []string, baselinePackets)
+		errorChan = make(chan error, baselinePackets)
+		wg        = new(sync.WaitGroup)
+	)
+
+	sendTestPayload := func() {
+		defer wg.Done()
+
 		resp, err := sendTCPPayload(cfg, testPayload)
 		if err != nil {
-			return nil, errors.New("failed to send test payload: %v", err)
+			errorChan <- errors.New("failed to send test payload: %v", err)
+			return
 		}
 
 		respTime, err := resp.responseTime()
 		if err != nil {
-			return nil, errors.New("failed to calculate response time to payload: %v", err)
+			errorChan <- errors.New("failed to calculate response time to payload: %v", err)
+			return
 		}
-		responseTimes[i] = int64(respTime)
+		timesChan <- int64(respTime)
 
 		firstNonACK, err := resp.firstNonACK()
 		if err != nil {
-			return nil, errors.New("failed to analyze response flags: %v", err)
+			errorChan <- errors.New("failed to analyze response flags: %v", err)
 		}
+		flagsChan <- flagsToStrings(firstNonACK.Flags())
+	}
 
-		currentRespFlags := flagsToStrings(firstNonACK.Flags())
-		if respFlags == nil {
-			respFlags = make([]string, len(currentRespFlags))
-			for i := range currentRespFlags {
-				respFlags[i] = string(currentRespFlags[i])
-			}
-		}
-		if !stringSlicesEqual(currentRespFlags, respFlags) {
+	for i := 0; i < baselinePackets; i++ {
+		wg.Add(1)
+		go sendTestPayload()
+	}
+	wg.Wait()
+
+	select {
+	case err := <-errorChan:
+		return nil, err
+	default:
+	}
+
+	close(timesChan)
+	close(flagsChan)
+	close(errorChan)
+
+	responseTimes := []int64{}
+	for respTime := range timesChan {
+		responseTimes = append(responseTimes, respTime)
+	}
+
+	responseFlags := <-flagsChan
+	for currentFlags := range flagsChan {
+		if !stringSlicesEqual(responseFlags, currentFlags) {
 			// Response flags are not consistent.
-			respFlags = []string{}
+			responseFlags = []string{}
+			break
 		}
 	}
 
@@ -98,7 +127,7 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		time.Duration(maxResponseTime),
 		// Truncating the std dev should be fine as we're only losing fractions of a nanosecond.
 		time.Duration(responseTimeStdDev),
-		respFlags,
+		responseFlags,
 	}, nil
 }
 
@@ -150,7 +179,6 @@ func (b ForRandomizedTransportBaseline) String() string {
 		for _, f := range b.ResponseFlags {
 			fmt.Fprint(buf, f, " ")
 		}
-		buf.ReadRune()
 	}
 	return buf.String()
 }
