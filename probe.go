@@ -22,7 +22,6 @@ import (
 )
 
 // TODO:
-// 	- try parallelizing binary search
 //	- clean up minor TODOs
 
 // Config for a probe.
@@ -36,6 +35,11 @@ type Config struct {
 	// BaselineData is any data saved from a previously run probe. Providing baseline data will
 	// reduce the time needed for a probe test.
 	BaselineData io.Reader
+
+	// MaxParallelism is the maximum number of goroutines spawned during a probe. This number is
+	// approximate and will be honored on a best-effort basis. A value of 0 indicates that there is
+	// no limit to parallelism.
+	MaxParallelism int
 
 	Logger io.Writer
 
@@ -115,7 +119,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	// 3. If the response never changes up to the maximum payload size, the check passes.
 
 	const (
-		maxPayloadSize  = 1024 * 1024
+		maxPayloadSize  = 64 * 1024
 		baselinePackets = 100
 	)
 
@@ -154,7 +158,23 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		fmt.Fprintln(cfg.logger(), *baseline)
 	}
 
-	explanations := map[int]ForRandomizedTransportExplanation{}
+	numSearchRoutines := cfg.MaxParallelism
+	if numSearchRoutines < 4 {
+		// There is currently a lower bound on the number of search routines.
+		numSearchRoutines = 4
+	}
+
+	var (
+		explanations            = make(chan ForRandomizedTransportExplanation, numSearchRoutines)
+		explanationsMap         = map[int]ForRandomizedTransportExplanation{}
+		explanationsMapComplete = make(chan struct{})
+	)
+	go func() {
+		for e := range explanations {
+			explanationsMap[e.PayloadSizeThreshold] = e
+		}
+		close(explanationsMapComplete)
+	}()
 
 	respOutOfBounds := func(payloadSize int) (bool, error) {
 		fmt.Fprintf(cfg.logger(), "trying %d byte payload\n", payloadSize)
@@ -184,7 +204,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		expectedFlags := baseline.flagsMatchExpected(flags)
 		withinTimeBounds, _ := baseline.withinAcceptedBounds(respTime)
 		if !expectedFlags || !withinTimeBounds {
-			explanations[payloadSize] = ForRandomizedTransportExplanation{
+			explanations <- ForRandomizedTransportExplanation{
 				payloadSize, respTime, flags, *baseline,
 			}
 			return true, nil
@@ -194,14 +214,16 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 
 	fmt.Fprintln(cfg.logger(), "trying varying payload sizes")
 
-	s := minBinarySearch{respOutOfBounds, map[int]bool{}}
+	s := newParallelSearch(respOutOfBounds, numSearchRoutines)
 	payloadSizeThreshold, err := s.search(2, maxPayloadSize)
+	close(explanations)
 	if err != nil {
 		return nil, errors.New("search for payload size threshold failed: %v", err)
 	}
 	if payloadSizeThreshold > 0 {
+		<-explanationsMapComplete
 		results.Success = true
-		results.Explanation = explanations[payloadSizeThreshold]
+		results.Explanation = explanationsMap[payloadSizeThreshold]
 	} else {
 		results.Success = false
 	}

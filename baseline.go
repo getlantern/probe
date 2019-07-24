@@ -2,7 +2,7 @@ package probe
 
 import (
 	"bytes"
-	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -22,14 +22,14 @@ type baselineData struct {
 
 func readBaselineData(r io.Reader) (*baselineData, error) {
 	bd := new(baselineData)
-	if err := gob.NewDecoder(r).Decode(bd); err != nil {
+	if err := json.NewDecoder(r).Decode(bd); err != nil {
 		return nil, err
 	}
 	return bd, nil
 }
 
 func (bd baselineData) write(w io.Writer) error {
-	return gob.NewEncoder(w).Encode(bd)
+	return json.NewEncoder(w).Encode(bd)
 }
 
 // ForRandomizedTransportBaseline represents the baseline used by ForRandomizedTransport.
@@ -49,6 +49,7 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 	var testPayload = []byte{1}
 
 	var (
+		jobsChan  = make(chan struct{}, baselinePackets)
 		timesChan = make(chan int64, baselinePackets)
 		flagsChan = make(chan []string, baselinePackets)
 		errorChan = make(chan error, baselinePackets)
@@ -78,9 +79,21 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		flagsChan <- flagsToStrings(firstNonACK.Flags())
 	}
 
+	parallelism := cfg.MaxParallelism
+	if parallelism == 0 {
+		parallelism = baselinePackets
+	}
+	for i := 0; i < parallelism; i++ {
+		go func() {
+			for range jobsChan {
+				sendTestPayload()
+			}
+		}()
+	}
+
 	for i := 0; i < baselinePackets; i++ {
 		wg.Add(1)
-		go sendTestPayload()
+		jobsChan <- struct{}{}
 	}
 	wg.Wait()
 
@@ -90,6 +103,7 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 	default:
 	}
 
+	close(jobsChan)
 	close(timesChan)
 	close(flagsChan)
 	close(errorChan)

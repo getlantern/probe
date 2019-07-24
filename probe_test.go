@@ -3,7 +3,6 @@ package probe
 import (
 	"bytes"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func (s testRandomizedTransportServer) serve(errChan chan<- error) {
 // Reads from conn into b until conn.Read blocks or returns an error.
 func readPayload(conn net.Conn, b []byte) (n int, err error) {
 	// There should not be a delay between reads if there is data on the connection.
-	const timeout = 100 * time.Microsecond
+	const timeout = time.Millisecond
 
 	var currentN int
 	for {
@@ -74,44 +73,45 @@ func readPayload(conn net.Conn, b []byte) (n int, err error) {
 	}
 }
 
+type testLogger struct {
+	t *testing.T
+}
+
+func (tl testLogger) Write(b []byte) (int, error) {
+	tl.t.Logf("\n%s", string(b))
+	return len(b), nil
+}
+
 func TestForRandomizedTransport(t *testing.T) {
 	t.Parallel()
 
 	const (
 		// Pre-configured baseline data.
-		minResponseTime = 200 * time.Microsecond
-		maxResponseTime = 1500 * time.Microsecond
-		respTimeStdDev  = 500 * time.Microsecond
+		minResponseTime = 1 * time.Microsecond
+		maxResponseTime = 2 * time.Millisecond
+		respTimeStdDev  = 1 * time.Millisecond
 		respFlags       = "FIN ACK"
 	)
+
+	baseline := ForRandomizedTransportBaseline{
+		minResponseTime,
+		maxResponseTime,
+		respTimeStdDev,
+		strings.Split(respFlags, " "),
+	}
 
 	t.Run("response time", func(t *testing.T) {
 		t.Parallel()
 
-		// The delay at the threshold size is well outside the normal response time (defined by the
+		// This delay at the threshold size is well outside the normal response time (defined by the
 		// baseline data).
-		const delayAtThreshold = 10 * time.Millisecond
-
-		baseline := ForRandomizedTransportBaseline{
-			minResponseTime,
-			maxResponseTime,
-			respTimeStdDev,
-			strings.Split(respFlags, " "),
-		}
-		atThreshold := func(conn net.Conn) error { time.Sleep(delayAtThreshold); return nil }
+		atThreshold := func(conn net.Conn) error { time.Sleep(10 * time.Millisecond); return nil }
 
 		FRTHelper(t, baseline, atThreshold)
 	})
 
 	t.Run("response flags", func(t *testing.T) {
 		t.Parallel()
-
-		baseline := ForRandomizedTransportBaseline{
-			minResponseTime,
-			maxResponseTime,
-			respTimeStdDev,
-			strings.Split(respFlags, " "),
-		}
 
 		// Writing something before hanging up will change the response flags.
 		atThreshold := func(conn net.Conn) error { _, err := conn.Write([]byte{0}); return err }
@@ -128,10 +128,14 @@ func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshol
 		localhost0 = "127.0.0.1:0"
 
 		// This is strategically chosen to appear relatively early in the binary search.
-		payloadSizeThreshold = 524289
+		payloadSizeThreshold = 526
 
 		// This needs to be the same as defined in ForRandomizedTransport.
-		maxPayloadSize = 1024 * 1024
+		maxPayloadSize = 64 * 1024
+
+		// This is the current lower bound for parallelism. Setting this too high can cause
+		// artificial test failures as the test server cannot keep up with incoming connections.
+		maxParallelism = 10
 	)
 
 	baselineBuf := new(bytes.Buffer)
@@ -159,12 +163,15 @@ func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshol
 	go s.serve(serverErrors)
 
 	results, err := ForRandomizedTransport(Config{
-		Network:      network,
-		Address:      s.Addr().String(),
-		BaselineData: baselineBuf,
-		Logger:       os.Stdout,
+		Network:        network,
+		Address:        s.Addr().String(),
+		BaselineData:   baselineBuf,
+		Logger:         testLogger{t},
+		MaxParallelism: maxParallelism,
 	})
 	require.NoError(t, err)
 	require.True(t, results.Success)
+
+	t.Log(results.Explanation)
 	require.Equal(t, payloadSizeThreshold, results.Explanation.(ForRandomizedTransportExplanation).PayloadSizeThreshold)
 }
