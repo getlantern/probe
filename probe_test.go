@@ -30,7 +30,11 @@ func (s testRandomizedTransportServer) serve(errChan chan<- error) {
 	for {
 		conn, err := s.Accept()
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && !netErr.Temporary() {
+				return
+			}
 			errChan <- errors.New("accept failed: %v", err)
+			continue
 		}
 		go func(c net.Conn) {
 			defer c.Close()
@@ -140,12 +144,16 @@ func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshol
 
 	serverErrors, done := make(chan error), make(chan struct{})
 	go func() {
-		select {
-		case err := <-serverErrors:
-			t.Fatal("server error:", err)
-		case <-done:
+		for err := range serverErrors {
+			select {
+			case <-done:
+				return
+			default:
+				t.Fatal("server error:", err)
+			}
 		}
 	}()
+	defer close(done)
 
 	s := testRandomizedTransportServer{l, payloadSizeThreshold, maxPayloadSize, atThreshold}
 	go s.serve(serverErrors)
