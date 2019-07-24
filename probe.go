@@ -304,6 +304,10 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	// Because we are sometimes triggering error states on the servers we write to, we expect to run
 	// into certain errors.
 	acceptableWriteError := func(n int, err error) bool {
+		if n == 0 {
+			return false
+		}
+
 		// A broken pipe or incorrect protocol error indicates that the connection has been reset.
 		// We expect some servers to do this for large payloads.
 		if strings.Contains(err.Error(), "broken pipe") {
