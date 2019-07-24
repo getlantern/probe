@@ -22,7 +22,8 @@ import (
 )
 
 // TODO:
-//	- clean up minor TODOs
+// 	- update go.mod
+//		- test
 
 // Config for a probe.
 type Config struct {
@@ -42,8 +43,6 @@ type Config struct {
 	MaxParallelism int
 
 	Logger io.Writer
-
-	// TODO: support timeout
 }
 
 func (c Config) logger() io.Writer {
@@ -272,8 +271,6 @@ func (r tcpResponse) responseTime() (time.Duration, error) {
 // Establishes a connection and sends the input payload. Returns all packets sent in response. The
 // response is guaranteed to have at least one packet.
 func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
-	// TODO: currently assuming in-order packet capture - vet or fix this
-
 	conn, err := probednet.Dial(cfg.Network, cfg.Address)
 	if err != nil {
 		return nil, errors.New("failed to dial address: %v", err)
