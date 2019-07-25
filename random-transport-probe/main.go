@@ -10,13 +10,18 @@ import (
 )
 
 var (
-	addr          = flag.String("addr", "52.231.39.25:443", "address to hit")
+	addr          = flag.String("addr", "", "address to hit")
 	baseline      = flag.String("baseline", "", "baseline file")
 	writeBaseline = flag.Bool("write-baseline", false, "overwrite the baseline file")
 )
 
 func main() {
 	flag.Parse()
+
+	if *addr == "" {
+		fmt.Fprintln(os.Stderr, "address must be specified")
+		os.Exit(1)
+	}
 
 	cfg := probe.Config{
 		Network:        "tcp",
@@ -54,6 +59,7 @@ func main() {
 	}
 
 	if results.Success {
+		fmt.Println("found evidence of randomized transport:")
 		fmt.Println(results.Explanation)
 		os.Exit(2)
 	}
