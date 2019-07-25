@@ -339,7 +339,6 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 			continue
 		}
 		// We don't care about non-temporary errors.
-		// TODO: we do want to know about network issues - how can we distinguish these?
 		break
 	}
 
