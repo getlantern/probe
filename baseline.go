@@ -164,12 +164,20 @@ func (b ForRandomizedTransportBaseline) withinAcceptedBounds(respTime time.Durat
 	return true, ""
 }
 
-func (b ForRandomizedTransportBaseline) flagsMatchExpected(flags []string) bool {
+func (b ForRandomizedTransportBaseline) flagsMatchExpected(flags []string) (_ bool, explanation string) {
 	if len(b.ResponseFlags) == 0 {
 		// No definition of expected flags - anything goes.
-		return true
+		return true, ""
 	}
-	return stringSlicesEqual(b.ResponseFlags, flags)
+	if !stringSlicesEqual(b.ResponseFlags, flags) {
+		explanation := fmt.Sprintf(
+			"response flags %v do not match those established by baseline %v",
+			flags,
+			b.ResponseFlags,
+		)
+		return false, explanation
+	}
+	return true, ""
 }
 
 func (b ForRandomizedTransportBaseline) complete() bool {

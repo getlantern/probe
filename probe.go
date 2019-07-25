@@ -21,10 +21,6 @@ import (
 	"github.com/getlantern/probednet/pktutil"
 )
 
-// TODO:
-// 	- update go.mod
-//		- test
-
 // Config for a probe.
 type Config struct {
 	// Network to use (ala net.Dial).
@@ -97,12 +93,13 @@ func (e ForRandomizedTransportExplanation) String() string {
 		)
 		return buf.String()
 	}
-	if ok := e.Baseline.flagsMatchExpected(e.ResponseFlags); !ok {
+	ok, explanation = e.Baseline.flagsMatchExpected(e.ResponseFlags)
+	if !ok {
 		fmt.Fprintf(
 			buf,
-			"response flags %v do not match those established by baseline %v",
-			e.ResponseFlags,
-			e.Baseline.ResponseFlags,
+			"response to payload of %d bytes fell outside the bounds established by the baseline: %s",
+			e.PayloadSizeThreshold,
+			explanation,
 		)
 		return buf.String()
 	}
@@ -200,7 +197,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		}
 
 		flags := flagsToStrings(firstNonACK.Flags())
-		expectedFlags := baseline.flagsMatchExpected(flags)
+		expectedFlags, _ := baseline.flagsMatchExpected(flags)
 		withinTimeBounds, _ := baseline.withinAcceptedBounds(respTime)
 		if !expectedFlags || !withinTimeBounds {
 			explanations <- ForRandomizedTransportExplanation{
