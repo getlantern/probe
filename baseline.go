@@ -54,12 +54,13 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		flagsChan = make(chan []string, baselinePackets)
 		errorChan = make(chan error, baselinePackets)
 		wg        = new(sync.WaitGroup)
+		tcpSender = tcpSender{cfg: cfg}
 	)
 
 	sendTestPayload := func() {
 		defer wg.Done()
 
-		resp, err := sendTCPPayload(cfg, testPayload)
+		resp, err := tcpSender.send(testPayload)
 		if err != nil {
 			errorChan <- errors.New("failed to send test payload: %v", err)
 			return

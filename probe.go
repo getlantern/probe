@@ -12,6 +12,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/gopacket"
@@ -180,6 +181,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		close(explanationsMapComplete)
 	}()
 
+	tcpSender := tcpSender{cfg: cfg}
 	respOutOfBounds := func(payloadSize int) (bool, error) {
 		fmt.Fprintf(cfg.logger(), "trying %d byte payload\n", payloadSize)
 
@@ -189,7 +191,7 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			return false, errors.New("failed to generate payload: %v", err)
 		}
 
-		resp, err := sendTCPPayload(cfg, payload)
+		resp, err := tcpSender.send(payload)
 		if err != nil {
 			return false, errors.New("failed to send payload: %v", err)
 		}
@@ -272,10 +274,16 @@ func (r tcpResponse) responseTime() (time.Duration, error) {
 	return firstResponse.Timestamp.Sub(firstSent.Timestamp), nil
 }
 
-// Establishes a connection and sends the input payload. Returns all packets sent in response. The
-// response is guaranteed to have at least one packet.
-func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
-	conn, err := probednet.Dial(cfg.Network, cfg.Address)
+type tcpSender struct {
+	cfg      Config
+	dialLock sync.Mutex
+}
+
+// Establishes a connection and sends the input payload.
+func (s *tcpSender) send(p []byte) (*tcpResponse, error) {
+	s.dialLock.Lock()
+	conn, err := probednet.Dial(s.cfg.Network, s.cfg.Address)
+	s.dialLock.Unlock()
 	if err != nil {
 		return nil, errors.New("failed to dial address: %v", err)
 	}
@@ -286,7 +294,7 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	captureErrors := make(chan error)
 	go func() {
 		defer close(captureComplete)
-		fmt.Fprintln(cfg.logger(), "================= captured packets ====================")
+		fmt.Fprintln(s.cfg.logger(), "================= captured packets ====================")
 		for pkt := range conn.CapturedPackets() {
 			decoded, err := pktutil.DecodeTransportPacket(pkt.Data, linkLayer)
 			if err != nil {
@@ -296,7 +304,7 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 			decoded.Timestamp = pkt.Timestamp
 			capturedPackets = append(capturedPackets, *decoded)
 
-			fmt.Fprintln(cfg.logger(), decoded.Pprint())
+			fmt.Fprintln(s.cfg.logger(), decoded.Pprint())
 		}
 	}()
 	go func() {
@@ -323,7 +331,7 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 		return false
 	}
 
-	n, err := conn.Write(payload)
+	n, err := conn.Write(p)
 	if err != nil && !acceptableWriteError(n, err) {
 		conn.Close()
 
@@ -333,8 +341,8 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 		return nil, errors.New("failed to write payload: %v", err)
 	}
 
-	if cfg.ResponseTimeout > 0 {
-		conn.SetReadDeadline(time.Now().Add(cfg.ResponseTimeout))
+	if s.cfg.ResponseTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(s.cfg.ResponseTimeout))
 	}
 
 	// Wait for a response.
