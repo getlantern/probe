@@ -41,7 +41,7 @@ type ForRandomizedTransportBaseline struct {
 	// first client payload packet and (b) was more than a simple ACK.
 	//
 	// In the case where the set of flags in the first response packet is not consistent, this will
-	// be an empty, non-nil slice.
+	// be an empty, non-nil slice. In the case where no response was received, this will be nil.
 	ResponseFlags []string
 }
 
@@ -72,15 +72,16 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		}
 		timesChan <- int64(respTime)
 
-		firstNonACK, err := resp.firstNonACK()
-		if err != nil {
-			errorChan <- errors.New("failed to analyze response flags: %v", err)
+		firstNonACK := resp.firstNonACK()
+		if firstNonACK == nil {
+			flagsChan <- nil
+		} else {
+			flagsChan <- flagsToStrings(firstNonACK.Flags())
 		}
-		flagsChan <- flagsToStrings(firstNonACK.Flags())
 	}
 
 	parallelism := cfg.MaxParallelism
-	if parallelism == 0 {
+	if parallelism <= 0 {
 		parallelism = baselinePackets
 	}
 	for i := 0; i < parallelism; i++ {
@@ -164,7 +165,17 @@ func (b ForRandomizedTransportBaseline) withinAcceptedBounds(respTime time.Durat
 	return true, ""
 }
 
+// Nil input indicates no response.
 func (b ForRandomizedTransportBaseline) flagsMatchExpected(flags []string) (_ bool, explanation string) {
+	switch {
+	case b.ResponseFlags == nil && flags == nil:
+		return true, ""
+	case b.ResponseFlags == nil && flags != nil:
+		return false, fmt.Sprintf("response %v does not match that established by baseline (no response)", b.ResponseFlags)
+	case b.ResponseFlags != nil && flags == nil:
+		return false, fmt.Sprintf("response (no response) does not match that established by basline %v", flags)
+	}
+
 	if len(b.ResponseFlags) == 0 {
 		// No definition of expected flags - anything goes.
 		return true, ""
@@ -183,8 +194,7 @@ func (b ForRandomizedTransportBaseline) flagsMatchExpected(flags []string) (_ bo
 func (b ForRandomizedTransportBaseline) complete() bool {
 	return b.MinResponseTime != 0 &&
 		b.MaxResponseTime != 0 &&
-		b.ResponseTimeStdDev != 0 &&
-		b.ResponseFlags != nil
+		b.ResponseTimeStdDev != 0
 }
 
 func (b ForRandomizedTransportBaseline) String() string {
@@ -206,6 +216,9 @@ func (b ForRandomizedTransportBaseline) String() string {
 }
 
 func stringSlicesEqual(a, b []string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
 	if len(a) != len(b) {
 		return false
 	}

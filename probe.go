@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"net"
 	"runtime"
 	"strings"
@@ -34,9 +35,14 @@ type Config struct {
 	BaselineData io.Reader
 
 	// MaxParallelism is the maximum number of goroutines spawned during a probe. This number is
-	// approximate and will be honored on a best-effort basis. A value of 0 indicates that there is
+	// approximate and will be honored on a best-effort basis. A value <= 0 indicates that there is
 	// no limit to parallelism.
 	MaxParallelism int
+
+	// ResponseTimeout is the time the probe allows the server to respond to each probe payload.
+	// After this duration has passed, the server is determined to have no response. A value <= 0
+	// indicates that there should be no timeout.
+	ResponseTimeout time.Duration
 
 	Logger io.Writer
 }
@@ -155,7 +161,9 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 	}
 
 	numSearchRoutines := cfg.MaxParallelism
-	if numSearchRoutines < 4 {
+	if numSearchRoutines <= 0 {
+		numSearchRoutines = baselinePackets
+	} else if numSearchRoutines < 4 {
 		// There is currently a lower bound on the number of search routines.
 		numSearchRoutines = 4
 	}
@@ -191,12 +199,11 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 			return false, errors.New("failed to calculate response time: %v", err)
 		}
 
-		firstNonACK, err := resp.firstNonACK()
-		if err != nil {
-			return false, errors.New("failed to analyze response flags: %v", err)
+		var flags []string
+		if firstNonACK := resp.firstNonACK(); firstNonACK != nil {
+			flags = flagsToStrings(firstNonACK.Flags())
 		}
 
-		flags := flagsToStrings(firstNonACK.Flags())
 		expectedFlags, _ := baseline.flagsMatchExpected(flags)
 		withinTimeBounds, _ := baseline.withinAcceptedBounds(respTime)
 		if !expectedFlags || !withinTimeBounds {
@@ -231,9 +238,10 @@ type tcpResponse struct {
 	packets []pktutil.TransportPacket
 }
 
-func (r tcpResponse) firstNonACK() (*pktutil.TransportPacket, error) {
+// Returns nil if no response was received.
+func (r tcpResponse) firstNonACK() *pktutil.TransportPacket {
 	if len(r.packets) < 1 {
-		return nil, errors.New("no response packets")
+		return nil
 	}
 
 	for _, pkt := range r.packets {
@@ -241,23 +249,22 @@ func (r tcpResponse) firstNonACK() (*pktutil.TransportPacket, error) {
 			pktutil.SYN, pktutil.FIN, pktutil.URG, pktutil.PSH,
 			pktutil.RST, pktutil.ECE, pktutil.CWR, pktutil.NS,
 		) {
-			return &pkt, nil
+			return &pkt
 		}
 	}
-	return nil, errors.New("could not find a response packet")
+	return nil
 }
 
 // We define the respone time as the time between the last packet we sent and the first packet we
-// received with any flag other than ACK.
+// received with any flag other than ACK. Returns the maximum duration if no response was received.
 func (r tcpResponse) responseTime() (time.Duration, error) {
 	if len(r.sent) < 1 {
 		return 0, errors.New("no sent packets")
 	}
 
-	firstSent := r.sent[0]
-	firstResponse, err := r.firstNonACK()
-	if err != nil {
-		return 0, err
+	firstSent, firstResponse := r.sent[0], r.firstNonACK()
+	if firstResponse == nil {
+		return time.Duration(math.MaxInt64), nil
 	}
 	if firstSent.Timestamp.IsZero() || firstResponse.Timestamp.IsZero() {
 		return 0, errors.New("no timestamps on captured packets")
@@ -326,13 +333,21 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 		return nil, errors.New("failed to write payload: %v", err)
 	}
 
+	if cfg.ResponseTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(cfg.ResponseTimeout))
+	}
+
 	// Wait for a response.
 	for {
 		_, err := conn.Read(make([]byte, 1024))
 		if err == nil {
 			break
 		}
-		if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+		netErr, ok := err.(net.Error)
+		if ok && netErr.Timeout() {
+			break
+		}
+		if ok && netErr.Temporary() {
 			continue
 		}
 		// We don't care about non-temporary errors.
@@ -356,6 +371,11 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 		if pkt.DestinedFor(conn.RemoteAddr()) && len(pkt.Payload) > 0 {
 			payloadPkts = append(payloadPkts, pkt)
 		}
+		// We don't count any packets after our own FIN (whether this FIN is a result of us closing
+		// the connection or a FIN ACK as a result of the peer closing the connection).
+		if pkt.DestinedFor(conn.RemoteAddr()) && pkt.HasAllFlags(pktutil.FIN) {
+			break
+		}
 		// We count packets as response packets iff they come after the first payload packet and are
 		// more than a simple ACK.
 		if len(payloadPkts) > 0 && pkt.DestinedFor(conn.LocalAddr()) && pkt.HasAnyFlags(
@@ -367,9 +387,6 @@ func sendTCPPayload(cfg Config, payload []byte) (*tcpResponse, error) {
 	}
 	if len(payloadPkts) == 0 {
 		return nil, errors.New("unable to find payload packets in capture output")
-	}
-	if len(responsePkts) == 0 {
-		return nil, errors.New("unable to find response packets in capture output")
 	}
 	return &tcpResponse{payloadPkts, responsePkts}, nil
 }

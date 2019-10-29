@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/getlantern/probe"
 )
 
 var (
-	addr          = flag.String("addr", "", "address to hit")
-	baseline      = flag.String("baseline", "", "baseline file")
-	writeBaseline = flag.Bool("write-baseline", false, "overwrite the baseline file")
+	addr            = flag.String("addr", "", "address to hit")
+	baseline        = flag.String("baseline", "", "baseline file")
+	writeBaseline   = flag.Bool("write-baseline", false, "overwrite the baseline file")
+	maxParallelism  = flag.Int("max-parallelism", 100, "max goroutines spawned in parallel")
+	responseTimeout = flag.Duration("resp-timeout", 5*time.Minute, "max time to wait for each server response")
 )
 
 func main() {
@@ -24,10 +27,11 @@ func main() {
 	}
 
 	cfg := probe.Config{
-		Network:        "tcp",
-		Address:        *addr,
-		Logger:         os.Stderr,
-		MaxParallelism: 100,
+		Network:         "tcp",
+		Address:         *addr,
+		Logger:          os.Stderr,
+		MaxParallelism:  *maxParallelism,
+		ResponseTimeout: *responseTimeout,
 	}
 
 	if *baseline != "" && !(*writeBaseline) {

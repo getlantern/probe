@@ -2,6 +2,7 @@ package probe
 
 import (
 	"bytes"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/getlantern/errors"
 )
+
+const responseTimeout = 50 * time.Millisecond
 
 // A test server mimicking behavior commonly seen in randomized transports. Upon receiving packets
 // up to some threshold size, the server immediately closes the connection. At the threshold size,
@@ -118,6 +121,14 @@ func TestForRandomizedTransport(t *testing.T) {
 
 		FRTHelper(t, baseline, atThreshold)
 	})
+
+	t.Run("no response", func(t *testing.T) {
+		t.Parallel()
+
+		atThreshold := func(conn net.Conn) error { time.Sleep(time.Duration(math.MaxInt64)); return nil }
+
+		FRTHelper(t, baseline, atThreshold)
+	})
 }
 
 func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshold func(net.Conn) error) {
@@ -163,11 +174,12 @@ func FRTHelper(t *testing.T, baseline ForRandomizedTransportBaseline, atThreshol
 	go s.serve(serverErrors)
 
 	results, err := ForRandomizedTransport(Config{
-		Network:        network,
-		Address:        s.Addr().String(),
-		BaselineData:   baselineBuf,
-		Logger:         testLogger{t},
-		MaxParallelism: maxParallelism,
+		Network:         network,
+		Address:         s.Addr().String(),
+		BaselineData:    baselineBuf,
+		Logger:          testLogger{t},
+		MaxParallelism:  maxParallelism,
+		ResponseTimeout: responseTimeout,
 	})
 	require.NoError(t, err)
 	require.True(t, results.Success)
