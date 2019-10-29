@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -138,13 +139,23 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		return nil, errors.New("failed to standard deviation of response time: %v", err)
 	}
 
-	return &ForRandomizedTransportBaseline{
-		time.Duration(minResponseTime),
-		time.Duration(maxResponseTime),
-		// Truncating the std dev should be fine as we're only losing fractions of a nanosecond.
-		time.Duration(responseTimeStdDev),
-		responseFlags,
-	}, nil
+	bl := ForRandomizedTransportBaseline{ResponseFlags: responseFlags}
+	for _, pair := range []struct {
+		src float64
+		dst *time.Duration
+	}{
+		{minResponseTime, &bl.MinResponseTime},
+		{maxResponseTime, &bl.MaxResponseTime},
+		{responseTimeStdDev, &bl.ResponseTimeStdDev},
+	} {
+		if pair.src == float64(math.MaxInt64) {
+			*pair.dst = time.Duration(math.MaxInt64)
+		} else {
+			// Note: this may truncate, but it would only be fractions of a nanosecond.
+			*pair.dst = time.Duration(pair.src)
+		}
+	}
+	return &bl, nil
 }
 
 // An explanation is provided when the response falls outside the accepted bounds.
