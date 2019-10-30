@@ -113,7 +113,7 @@ func (e ForRandomizedTransportExplanation) String() string {
 	return ""
 }
 
-// ForRandomizedTransport probes for evidence of a randomized transport like obsf4 or Lampshade.
+// ForRandomizedTransport probes for evidence of a randomized transport like Lampshade.
 func ForRandomizedTransport(cfg Config) (*Results, error) {
 
 	// 1. Establish a baseline response using single-byte payloads.
@@ -131,6 +131,12 @@ func ForRandomizedTransport(cfg Config) (*Results, error) {
 		err      error
 		results  Results
 	)
+
+	switch cfg.Network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		return nil, errors.New("randomized transport probe not implemented for this network")
+	}
 
 	if cfg.BaselineData != nil {
 		bd, err := readBaselineData(cfg.BaselineData)
