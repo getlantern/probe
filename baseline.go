@@ -47,15 +47,15 @@ type ForRandomizedTransportBaseline struct {
 }
 
 func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*ForRandomizedTransportBaseline, error) {
-	var testPayload = []byte{1}
 
 	var (
-		jobsChan  = make(chan struct{}, baselinePackets)
-		timesChan = make(chan int64, baselinePackets)
-		flagsChan = make(chan []string, baselinePackets)
-		errorChan = make(chan error, baselinePackets)
-		wg        = new(sync.WaitGroup)
-		tcpSender = tcpSender{cfg: cfg}
+		testPayload = []byte{1}
+		jobsChan    = make(chan struct{}, baselinePackets)
+		timesChan   = make(chan int64, baselinePackets)
+		flagsChan   = make(chan []string, baselinePackets)
+		errorChan   = make(chan error, baselinePackets)
+		wg          = new(sync.WaitGroup)
+		tcpSender   = tcpSender{cfg: cfg}
 	)
 
 	sendTestPayload := func() {
@@ -99,17 +99,16 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		jobsChan <- struct{}{}
 	}
 	wg.Wait()
+	close(jobsChan)
+	close(timesChan)
+	close(flagsChan)
+	close(errorChan)
 
 	select {
 	case err := <-errorChan:
 		return nil, err
 	default:
 	}
-
-	close(jobsChan)
-	close(timesChan)
-	close(flagsChan)
-	close(errorChan)
 
 	responseTimes := []int64{}
 	for respTime := range timesChan {
