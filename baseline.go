@@ -99,16 +99,17 @@ func establishRandomizedTransportBaseline(cfg Config, baselinePackets int) (*For
 		jobsChan <- struct{}{}
 	}
 	wg.Wait()
-	close(jobsChan)
-	close(timesChan)
-	close(flagsChan)
-	close(errorChan)
 
 	select {
 	case err := <-errorChan:
 		return nil, err
 	default:
 	}
+
+	close(jobsChan)
+	close(timesChan)
+	close(flagsChan)
+	close(errorChan)
 
 	responseTimes := []int64{}
 	for respTime := range timesChan {
